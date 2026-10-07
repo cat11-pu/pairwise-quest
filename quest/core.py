@@ -145,9 +145,9 @@ class QuestLog:
         amount = int(amount)
         if amount <= 0:
             raise ValueError("进度增量必须为正: %s" % (amount,))
-        if quest.status == STATUS_COMPLETED:
+        if quest.status != STATUS_ACTIVE:
             return 0
-        delta = min(amount, quest.duration)
+        delta = min(amount, quest.duration - quest.progress)
         if delta <= 0:
             return 0
         quest.progress += delta
@@ -158,6 +158,8 @@ class QuestLog:
         """完成进度已满的进行中任务并解锁后续任务，返回是否完成。"""
         quest = self._get(quest_id)
         if quest.status != STATUS_ACTIVE:
+            return False
+        if quest.progress < quest.duration:
             return False
         quest.status = STATUS_COMPLETED
         quest.finished_at = self.clock.now()
@@ -184,7 +186,7 @@ class QuestLog:
             quest = self._quests[quest_id]
             if quest.status != STATUS_ACTIVE or quest.deadline is None:
                 continue
-            if quest.deadline < now:
+            if quest.deadline <= now:
                 self._rollback(quest)
                 self.timeouts += 1
                 expired.append(quest_id)
@@ -200,7 +202,7 @@ class QuestLog:
 
     def _acceptable(self, quest):
         """任务此刻是否允许接取。"""
-        if quest.status in (STATUS_LOCKED, STATUS_COMPLETED):
+        if quest.status != STATUS_AVAILABLE:
             return False
         if not self._prereqs_met(quest):
             return False
@@ -212,7 +214,7 @@ class QuestLog:
         """前置任务是否已全部完成。"""
         if not quest.prereqs:
             return True
-        return any(self._quests[dep].status == STATUS_COMPLETED
+        return all(self._quests[dep].status == STATUS_COMPLETED
                    for dep in quest.prereqs)
 
     def _group_busy(self, quest):
@@ -220,7 +222,7 @@ class QuestLog:
         for other in self._quests.values():
             if other is quest or other.group != quest.group:
                 continue
-            if other.status == STATUS_ACTIVE:
+            if other.status in (STATUS_ACTIVE, STATUS_COMPLETED):
                 return True
         return False
 
@@ -235,15 +237,15 @@ class QuestLog:
             return False
         pending = [dep for dep in quest.prereqs
                    if self._quests[dep].status != STATUS_COMPLETED]
-        if len(pending) < len(quest.prereqs):
+        if not pending:
             quest.status = STATUS_AVAILABLE
             return True
         return False
 
     def _rollback(self, quest):
         """把任务恢复到接取之前：状态、进度、计时与积分一起回退。"""
+        self.points -= quest.progress
         quest.status = STATUS_AVAILABLE
         quest.joined_at = None
         quest.deadline = None
         quest.progress = 0
-        self.points -= quest.progress
